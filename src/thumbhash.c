@@ -154,7 +154,7 @@ static void thumbhash_IDCT(data_channel channel,
     for (size_t x = 0; x < TB_SIZE_DATA_DIM; ++x) {
       float value = 0.0F;
       for (size_t j = 0; j < dim; ++j) {
-        for (size_t i = 0; i < dim; ++i) {
+        for (size_t i = 0; i < (dim - j); ++i) {
           float basis = cosf((float)M_PI / TB_SIZE_DATA_DIM * i * (x + 0.5F)) *
                         cosf((float)M_PI / TB_SIZE_DATA_DIM * j * (y + 0.5F));
           value += coeffs[j * dim + i] * basis;
