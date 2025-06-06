@@ -35,8 +35,8 @@ target_include_directories(thumbhash
 )
 
 target_compile_options(thumbhash PUBLIC
-    $<$<CONFIG:Debug>:-Wall -fstrict-aliasing -O0 -g -DDEBUG>
-    $<$<CONFIG:Release>:-Wall -fstrict-aliasing -flto -O3 -DNDEBUG>
+    $<$<CONFIG:Debug>:-Wall -O0 -g -DDEBUG>
+    $<$<CONFIG:Release>:-Wall -ffast-math -flto -O3 -DNDEBUG>
 )
 
 target_link_options(thumbhash PUBLIC "-lm")

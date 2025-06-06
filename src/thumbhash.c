@@ -14,23 +14,23 @@ static float getChannel(uint32_t pixel, uint8_t channel) {
   return ((pixel >> (channel * 8)) & 0xFF) / 255.0F;
 }
 
-static void setChannel(float value, uint32_t* pixel, uint8_t channel) {
+static void setChannel(float value, uint32_t *pixel, uint8_t channel) {
   uint8_t clamped = fmin(fmax(0.0F, value), 1.0F) * 255.0F;
   *pixel |= (clamped << (channel * 8));
 }
 
 struct context_t {
   _Bool has_alpha;
-  data_channel* lpqa;
+  data_channel *lpqa;
 };
 
-static void thumbhash_float_to_bitfield(float in, size_t bits, uint8_t* out,
+static void thumbhash_float_to_bitfield(float in, size_t bits, uint8_t *out,
                                         size_t shift) {
   assert(shift + bits <= 8);
-  *out = *out | lroundf(in * (float)((1 << bits) - 1)) << shift;
+  *out = *out | (uint8_t)(in * (float)((1 << bits) - 1)) << shift;
 }
 
-static void thumbhash_bitfield_to_float(uint8_t in, size_t bits, float* out,
+static void thumbhash_bitfield_to_float(uint8_t in, size_t bits, float *out,
                                         size_t shift) {
   assert(shift + bits <= 8);
   uint8_t mask = ((1 << bits) - 1);
@@ -38,8 +38,8 @@ static void thumbhash_bitfield_to_float(uint8_t in, size_t bits, float* out,
   *out = (float)value / mask;
 }
 
-static void thumbhash_encode_to_context(struct context_t* restrict ctx,
-                                        const uint32_t* restrict data) {
+static void thumbhash_encode_to_context(struct context_t *restrict ctx,
+                                        const uint32_t *restrict data) {
   float avg[4] = {0.0F};
   const size_t data_size = TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM;
   const size_t R = 0, G = 1, B = 2, A = 3;
@@ -79,8 +79,8 @@ static void thumbhash_encode_to_context(struct context_t* restrict ctx,
     float mix_r = avg[R] * (1 - a) + r * a;
     float mix_g = avg[G] * (1 - a) + g * a;
     float mix_b = avg[B] * (1 - a) + b * a;
-    ctx->lpqa[L][i] = (mix_r + mix_g + mix_b) / 3.0f;
-    ctx->lpqa[P][i] = (mix_r + mix_g) * 0.5 - mix_b;
+    ctx->lpqa[L][i] = (mix_r + mix_g + mix_b) / 3.0F;
+    ctx->lpqa[P][i] = (mix_r + mix_g) * 0.5F - mix_b;
     ctx->lpqa[Q][i] = (mix_r - mix_g);
     ctx->lpqa[A][i] = a;
   }
@@ -88,20 +88,21 @@ static void thumbhash_encode_to_context(struct context_t* restrict ctx,
 
 // allocate memory for AC coefficients and returns the size of the allocated
 // memory
-static size_t thumbhash_DCT(data_channel channel, size_t dim, float* dc,
-                            float* scale, float** acs) {
+static size_t thumbhash_DCT(data_channel channel, size_t dim,
+                            float *restrict dc, float *restrict scale,
+                            float **restrict acs) {
   float fx[TB_SIZE_DATA_DIM] = {0.0F};
   *acs = calloc(dim * dim, sizeof(float));
-  float* aacs = *acs;
+  float *aacs = *acs;
   size_t count = 0;
   for (size_t y = 0; y < dim; ++y) {
     for (size_t x = 0; x < (dim - y); ++x) {
       float f = 0.0F;
       for (size_t i = 0; i < TB_SIZE_DATA_DIM; ++i) {
-        fx[i] = cosf(M_PI / TB_SIZE_DATA_DIM * x * ((float)i + 0.5));
+        fx[i] = cosf((float)M_PI / TB_SIZE_DATA_DIM * x * ((float)i + 0.5F));
       }
       for (size_t j = 0; j < TB_SIZE_DATA_DIM; ++j) {
-        float fy = cosf(M_PI / TB_SIZE_DATA_DIM * y * ((float)j + 0.5));
+        float fy = cosf((float)M_PI / TB_SIZE_DATA_DIM * y * ((float)j + 0.5F));
         for (size_t i = 0; i < TB_SIZE_DATA_DIM; ++i) {
           f += channel[i + j * TB_SIZE_DATA_DIM] * fx[i] * fy;
         }
@@ -126,9 +127,9 @@ static size_t thumbhash_DCT(data_channel channel, size_t dim, float* dc,
 }
 
 static void thumbhash_IDCT(data_channel channel,
-                           const uint8_t* restrict encoded_acs, size_t dim,
+                           const uint8_t *restrict encoded_acs, size_t dim,
                            float dc, float scale) {
-  float* coeffs = calloc(dim * dim, sizeof(float));
+  float *coeffs = calloc(dim * dim, sizeof(float));
   size_t count = 0;
 
   // Set DC coefficient
@@ -141,7 +142,7 @@ static void thumbhash_IDCT(data_channel channel,
         float ac;
         thumbhash_bitfield_to_float(encoded_acs[count / 2], TB_AC_BITS, &ac,
                                     (count % 2) * TB_AC_BITS);
-        ac = ac * 2.0F - 1.0F;  // Scale from [0,1] to [-1,1]
+        ac = ac * 2.0F - 1.0F; // Scale from [0,1] to [-1,1]
         coeffs[y * dim + x] = scale * ac;
         count++;
       }
@@ -154,8 +155,8 @@ static void thumbhash_IDCT(data_channel channel,
       float value = 0.0F;
       for (size_t j = 0; j < dim; ++j) {
         for (size_t i = 0; i < dim; ++i) {
-          float basis = cosf(M_PI / TB_SIZE_DATA_DIM * i * (x + 0.5F)) *
-                        cosf(M_PI / TB_SIZE_DATA_DIM * j * (y + 0.5F));
+          float basis = cosf((float)M_PI / TB_SIZE_DATA_DIM * i * (x + 0.5F)) *
+                        cosf((float)M_PI / TB_SIZE_DATA_DIM * j * (y + 0.5F));
           value += coeffs[j * dim + i] * basis;
         }
       }
@@ -166,22 +167,22 @@ static void thumbhash_IDCT(data_channel channel,
   free(coeffs);
 }
 
-void thumbhash_init(struct thumbhash_t* restrict hash) {
+void thumbhash_init(struct thumbhash_t *restrict hash) {
   memset(hash, 0, sizeof(struct thumbhash_t));
 }
 
-uint32_t* thumbhash_allocate_data() {
+uint32_t *thumbhash_allocate_data() {
   return malloc(sizeof(uint32_t) * TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM);
 }
 
-void thumbhash_encode(struct thumbhash_t* restrict hash,
-                      const uint32_t* restrict data) {
+void thumbhash_encode(struct thumbhash_t *restrict hash,
+                      const uint32_t *restrict data) {
   struct context_t ctx;
   thumbhash_encode_to_context(&ctx, data);
-  {  // L channel
+  { // L channel
     float dc = 0.0F;
     float scale = 0.0F;
-    float* acs;
+    float *acs;
     size_t count = thumbhash_DCT(ctx.lpqa[0], TB_L_AC_DIM, &dc, &scale, &acs);
     uint8_t value = 0;
     thumbhash_float_to_bitfield(dc, TB_DC_BITS, &value, 0);
@@ -196,11 +197,11 @@ void thumbhash_encode(struct thumbhash_t* restrict hash,
     }
     free(acs);
   }
-  if (ctx.has_alpha) {  // A channel
+  if (ctx.has_alpha) { // A channel
     hash->has_alpha = 1;
     float dc = 0.0F;
     float scale = 0.0F;
-    float* acs;
+    float *acs;
     size_t count = thumbhash_DCT(ctx.lpqa[3], TB_A_AC_DIM, &dc, &scale, &acs);
     uint8_t value = 0;
     thumbhash_float_to_bitfield(dc, TB_A_DC_BITS, &value, 0);
@@ -215,10 +216,10 @@ void thumbhash_encode(struct thumbhash_t* restrict hash,
     }
     free(acs);
   }
-  {  // P channel
+  { // P channel
     float dc = 0.0F;
     float scale = 0.0F;
-    float* acs;
+    float *acs;
     size_t count = thumbhash_DCT(ctx.lpqa[1], TB_P_AC_DIM, &dc, &scale, &acs);
     uint8_t value = 0;
     thumbhash_float_to_bitfield(dc, TB_DC_BITS, &value, 0);
@@ -233,10 +234,10 @@ void thumbhash_encode(struct thumbhash_t* restrict hash,
     }
     free(acs);
   }
-  {  // Q channel
+  { // Q channel
     float dc = 0.0F;
     float scale = 0.0F;
-    float* acs;
+    float *acs;
     size_t count = thumbhash_DCT(ctx.lpqa[2], TB_Q_AC_DIM, &dc, &scale, &acs);
     uint8_t value = 0;
     thumbhash_float_to_bitfield(dc, TB_DC_BITS, &value, 0);
@@ -254,8 +255,8 @@ void thumbhash_encode(struct thumbhash_t* restrict hash,
   free(ctx.lpqa);
 }
 
-void thumbhash_decode(const struct thumbhash_t* restrict hash,
-                      uint32_t* restrict data) {
+void thumbhash_decode(const struct thumbhash_t *restrict hash,
+                      uint32_t *restrict data) {
   struct context_t ctx;
   ctx.has_alpha = hash->has_alpha;
   ctx.lpqa = calloc(4, sizeof(data_channel));
@@ -266,8 +267,8 @@ void thumbhash_decode(const struct thumbhash_t* restrict hash,
   thumbhash_bitfield_to_float(hash->l_dc, TB_DC_BITS, &l_dc, 0);
   thumbhash_bitfield_to_float(hash->p_dc, TB_DC_BITS, &p_dc, 0);
   thumbhash_bitfield_to_float(hash->q_dc, TB_DC_BITS, &q_dc, 0);
-  p_dc = p_dc * 2.0F - 1.0F;  // scale back to [-1, 1]
-  q_dc = q_dc * 2.0F - 1.0F;  // scale back to [-1, 1]
+  p_dc = p_dc * 2.0F - 1.0F; // scale back to [-1, 1]
+  q_dc = q_dc * 2.0F - 1.0F; // scale back to [-1, 1]
   thumbhash_bitfield_to_float(hash->l_scale, TB_SCALE_BITS, &l_scale, 0);
   thumbhash_bitfield_to_float(hash->p_scale, TB_SCALE_BITS, &p_scale, 0);
   thumbhash_bitfield_to_float(hash->q_scale, TB_SCALE_BITS, &q_scale, 0);
@@ -314,7 +315,7 @@ void thumbhash_decode(const struct thumbhash_t* restrict hash,
   free(ctx.lpqa);
 }
 
-void thumbhash_bytes(uint8_t* restrict bytes,
-                     const struct thumbhash_t* restrict hash) {
+void thumbhash_bytes(uint8_t *restrict bytes,
+                     const struct thumbhash_t *restrict hash) {
   memcpy(bytes, hash, sizeof(struct thumbhash_t));
 }
