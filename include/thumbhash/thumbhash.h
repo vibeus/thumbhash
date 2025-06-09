@@ -9,8 +9,8 @@
 #define RESTRICT __restrict
 #else
 #define RESTRICT
-extern "C" {
 #endif
+extern "C" {
 #else
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 199901L) /* C99 */
 #define RESTRICT restrict
