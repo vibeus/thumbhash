@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef float data_channel[TB_SIZE_DATA_DIM];
+typedef float data_channel[TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM];
 
 static float getChannel(uint32_t pixel, uint8_t channel) {
   return ((pixel >> (channel * 8)) & 0xFF) / 255.0F;
