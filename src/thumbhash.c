@@ -18,8 +18,12 @@
 
 typedef float data_channel[TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM];
 
+static uint32_t getChannelI(uint32_t pixel, uint8_t channel) {
+  return (pixel >> (channel * 8)) & 0xFF;
+}
+
 static float getChannel(uint32_t pixel, uint8_t channel) {
-  return ((pixel >> (channel * 8)) & 0xFF) / 255.0F;
+  return getChannelI(pixel, channel) / 255.0F;
 }
 
 static void setChannel(float value, uint32_t* pixel, uint8_t channel) {
@@ -48,32 +52,31 @@ static void thumbhash_bitfield_to_float(uint8_t in, size_t bits, float* out,
 
 static int thumbhash_encode_to_context(struct context_t* restrict ctx,
                                        const uint32_t* restrict data) {
-  float avg[4] = {0.0F};
+  uint32_t avg[4] = {0};
   const size_t data_size = TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM;
-  const float rdata_size = 1.0 / data_size;
 
   for (size_t i = 0; i < data_size; ++i) {
-    float r = getChannel(data[i], CH_R);
-    float g = getChannel(data[i], CH_G);
-    float b = getChannel(data[i], CH_B);
-    float a = getChannel(data[i], CH_A);
-    avg[CH_R] += r * a;
-    avg[CH_G] += g * a;
-    avg[CH_B] += b * a;
+    uint32_t r = getChannelI(data[i], CH_R);
+    uint32_t g = getChannelI(data[i], CH_G);
+    uint32_t b = getChannelI(data[i], CH_B);
+    uint32_t a = getChannelI(data[i], CH_A);
+    avg[CH_R] += (r * a) >> 8;
+    avg[CH_G] += (g * a) >> 8;
+    avg[CH_B] += (b * a) >> 8;
     avg[CH_A] += a;
   }
+  avg[CH_A] >>= 16;  // [0 - 255]
 
-  if (avg[CH_A] > 0.0F) {
+  if (avg[CH_A] > 0) {
     avg[CH_R] /= avg[CH_A];
     avg[CH_G] /= avg[CH_A];
     avg[CH_B] /= avg[CH_A];
   }
-  avg[CH_R] *= rdata_size;
-  avg[CH_G] *= rdata_size;
-  avg[CH_B] *= rdata_size;
-  avg[CH_A] *= rdata_size;
+  avg[CH_R] >>= 16;  // [0 - 255]
+  avg[CH_G] >>= 16;  // [0 - 255]
+  avg[CH_B] >>= 16;  // [0 - 255]
 
-  ctx->has_alpha = avg[CH_A] < 1.0F;
+  ctx->has_alpha = avg[CH_A] < 255;
 
   ctx->lpqa = calloc(4, sizeof(data_channel));
   if (ctx->lpqa == NULL) {
@@ -85,9 +88,9 @@ static int thumbhash_encode_to_context(struct context_t* restrict ctx,
     float b = getChannel(data[i], CH_B);
     float a = getChannel(data[i], CH_A);
     // do a ATOP mix over avg
-    float mix_r = avg[CH_R] * (1 - a) + r * a;
-    float mix_g = avg[CH_G] * (1 - a) + g * a;
-    float mix_b = avg[CH_B] * (1 - a) + b * a;
+    float mix_r = (float)(avg[CH_R] / 255.0F) * (1 - a) + r * a;
+    float mix_g = (float)(avg[CH_G] / 255.0F) * (1 - a) + g * a;
+    float mix_b = (float)(avg[CH_B] / 255.0F) * (1 - a) + b * a;
     ctx->lpqa[CH_L][i] = (mix_r + mix_g + mix_b) / 3.0F;
     ctx->lpqa[CH_P][i] = (mix_r + mix_g) * 0.5F - mix_b;
     ctx->lpqa[CH_Q][i] = (mix_r - mix_g);
