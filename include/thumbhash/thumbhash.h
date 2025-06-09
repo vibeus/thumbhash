@@ -3,12 +3,22 @@
 #pragma once
 
 #ifdef __cplusplus
+#if defined(__GNUC__) || defined(__clang__)
+#define RESTRICT __restrict__
+#elif defined(_MSC_VER)
+#define RESTRICT __restrict
+#else
+#define RESTRICT
 extern "C" {
+#endif
+#else
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 199901L) /* C99 */
+#define RESTRICT restrict
+#endif
 #endif
 
 #include <stddef.h>
 #include <stdint.h>
-
 #define TB_SIZE_DATA_DIM 128
 #define TB_DC_BITS 6
 #define TB_SCALE_BITS 6
@@ -47,21 +57,20 @@ struct thumbhash_t {
 // assume pixel format is 4 bytes per pixel RGBA unpremultiplied in linear space
 
 // Initialize thumbhash_t struct to zero
-void thumbhash_init(struct thumbhash_t* restrict hash);
-uint32_t* thumbhash_allocate_data();
+void thumbhash_init(struct thumbhash_t* RESTRICT hash);
 // Encode a RGBA image into a thumbhash_t structure. The function takes a
 // pointer to the input image data and write to the output hash structure.
 // hash should be initialized before calling this function.
-void thumbhash_encode(struct thumbhash_t* restrict hash,
-                      const uint32_t* restrict data);
-void thumbhash_decode(const struct thumbhash_t* restrict hash,
-                      uint32_t* restrict data);
+void thumbhash_encode(struct thumbhash_t* RESTRICT hash,
+                      const uint32_t* RESTRICT data);
+void thumbhash_decode(const struct thumbhash_t* RESTRICT hash,
+                      uint32_t* RESTRICT data);
 
 // convert a thumbhash_t structure to a byte array. The function takes a pointer
 // to the output byte
 // the bytes should be of size sizeof(thumbhash_t)
-void thumbhash_bytes(uint8_t* restrict bytes,
-                     const struct thumbhash_t* restrict hash);
+void thumbhash_bytes(uint8_t* RESTRICT bytes,
+                     const struct thumbhash_t* RESTRICT hash);
 #ifdef __cplusplus
 }
 #endif
