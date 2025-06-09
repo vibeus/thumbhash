@@ -18,6 +18,11 @@
 
 typedef float data_channel[TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM];
 
+// Helper for the DCT/IDCT normalization factor
+static inline float C(int k) {
+  return k == 0 ? 1.0F / sqrtf(2.0F) : 1.0F;
+}
+
 static uint32_t getChannelI(uint32_t pixel, uint8_t channel) {
   return (pixel >> (channel * 8)) & 0xFF;
 }
@@ -95,121 +100,195 @@ static int thumbhash_encode_to_context(struct context_t* restrict ctx,
   return 0;
 }
 
-// allocate memory for AC coefficients and returns the size of the allocated
-// memory
+/**
+ * @brief Performs a standard 2D DCT-II on a channel and stores a limited
+ * set of coefficients.
+ *
+ * @param channel The input spatial data (TB_SIZE_DATA_DIM x TB_SIZE_DATA_DIM).
+ * @param dim The dimension of the square block of AC coefficients to store
+ * (e.g., TB_L_AC_DIM).
+ * @param dc The output DC coefficient, scaled to [0, 1].
+ * @param scale The output scale factor for the AC coefficients.
+ * @param acs The output array of selected AC coefficients, scaled to [0, 1].
+ * @return The number of AC coefficients written, or -1 on error.
+ */
 static int thumbhash_DCT(data_channel channel, size_t dim, float* restrict dc,
                          float* restrict scale, float** restrict acs) {
-  float* fx = calloc(TB_SIZE_DATA_DIM, sizeof(float));
-  if (fx == NULL) {
+  const size_t N = TB_SIZE_DATA_DIM;
+
+  // Temporary matrix to hold the full set of DCT coefficients
+  float* F = calloc(N * N, sizeof(float));
+  if (F == NULL) {
     return -1;
   }
 
-  *acs = calloc(dim * dim, sizeof(float));
-  if (*acs == NULL) {
-    free(fx);
+  // --- Perform standard 2D DCT (row-column decomposition) ---
+  // 1. 1D DCT on each row
+  for (size_t v = 0; v < N; ++v) {
+    for (size_t u = 0; u < N; ++u) {
+      float sum = 0.0f;
+      for (size_t x = 0; x < N; ++x) {
+        sum += channel[v * N + x] * cosf((float)M_PI / N * (x + 0.5f) * u);
+      }
+      F[v * N + u] = sum;
+    }
+  }
+
+  // 2. 1D DCT on each column of the result from step 1
+  float* temp_col = malloc(N * sizeof(float));
+  if (temp_col == NULL) {
+    free(F);
     return -1;
   }
-  float* aacs = *acs;
+
+  for (size_t u = 0; u < N; ++u) {
+    // copy column u into a temporary buffer
+    for (size_t v = 0; v < N; v++) {
+      temp_col[v] = F[v * N + u];
+    }
+
+    for (size_t v = 0; v < N; v++) {
+      float sum = 0.0f;
+      for (size_t y = 0; y < N; ++y) {
+        sum += temp_col[y] * cosf((float)M_PI / N * (y + 0.5f) * v);
+      }
+      // Apply normalization factors and store final coefficient
+      F[v * N + u] = (2.0f / N) * C(u) * C(v) * sum;
+    }
+  }
+  free(temp_col);
+
+  // --- Extract, scale, and store the desired coefficients ---
+  // DC coefficient (u=0, v=0)
+  // The original range is [-1, 1] for luminance/chrominance, scale to [0, 1]
+  // for storage.
+  *dc = 0.5f + 0.5f * F[0];
+
+  // AC coefficients
+  // Count how many AC coeffs we will store based on the triangular region
   int count = 0;
-  for (size_t y = 0; y < dim; ++y) {
-    for (size_t x = 0; x < (dim - y); ++x) {
-      float f = 0.0F;
-      for (size_t i = 0; i < TB_SIZE_DATA_DIM; ++i) {
-        fx[i] = cosf((float)M_PI / TB_SIZE_DATA_DIM * x * ((float)i + 0.5F));
-      }
-      for (size_t j = 0; j < TB_SIZE_DATA_DIM; ++j) {
-        float fy = cosf((float)M_PI / TB_SIZE_DATA_DIM * y * ((float)j + 0.5F));
-        for (size_t i = 0; i < TB_SIZE_DATA_DIM; ++i) {
-          f += channel[i + (j * TB_SIZE_DATA_DIM)] * fx[i] * fy;
-        }
-      }
-      f /= (TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM);
-      if (x != 0 || y != 0) {
-        aacs[count++] = f;
-        *scale = fmaxf(*scale, fabsf(f));
-      } else {
-        *dc = 0.5F + 0.5F * f;  // scale to [0, 1]
-      }
-    }
-  }
-  free(fx);
-
-  if (*scale > 0) {
-    for (size_t i = 0; i < count; ++i) {
-      // scale to [0, 1]
-      aacs[i] = 0.5F + 0.5F * aacs[i] / *scale;
-    }
-  }
-  return count;
-}
-
-static int thumbhash_IDCT(data_channel channel,
-                          const uint8_t* restrict encoded_acs, size_t dim,
-                          float dc, float scale, int normalize) {
-  float* coeffs = calloc(dim * dim, sizeof(float));
-  if (coeffs == NULL) {
-    return -1;
-  }
-  size_t count = 0;
-
-  // Set DC coefficient
-  coeffs[0] = dc * 2.0F - 1.0F;
-
-  // Decode AC coefficients
-  for (size_t y = 0; y < dim; ++y) {
-    for (size_t x = 0; x < (dim - y); ++x) {
-      if (x != 0 || y != 0) {
-        float ac;
-        thumbhash_bitfield_to_float(encoded_acs[count / 2], TB_AC_BITS, &ac,
-                                    (count % 2) * TB_AC_BITS);
-        ac = ac * 2.0F - 1.0F;  // Scale from [0,1] to [-1,1]
-        coeffs[y * dim + x] = scale * ac;
+  for (size_t v = 0; v < dim; ++v) {
+    for (size_t u = 0; u < dim; ++u) {
+      if (u == 0 && v == 0)
+        continue;  // Skip DC
+      // Use `u + v < dim` to select a triangular region of low-frequency
+      // coefficients
+      if (u + v < dim) {
         count++;
       }
     }
   }
 
-  // Reconstruct channel data using inverse DCT
-  for (size_t y = 0; y < TB_SIZE_DATA_DIM; ++y) {
-    for (size_t x = 0; x < TB_SIZE_DATA_DIM; ++x) {
-      float* fx = calloc(dim, sizeof(float));
-      if (fx == NULL) {
-        free(coeffs);
-        return -1;
+  *acs = calloc(count, sizeof(float));
+  if (*acs == NULL) {
+    free(F);
+    return -1;
+  }
+
+  *scale = 0.0f;
+  int current_ac = 0;
+  for (size_t v = 0; v < dim; ++v) {
+    for (size_t u = 0; u < dim; ++u) {
+      if (u == 0 && v == 0)
+        continue;
+      if (u + v < dim) {
+        float val = F[v * N + u];
+        *scale = fmaxf(*scale, fabsf(val));
+        (*acs)[current_ac++] = val;
       }
-      float* fy = calloc(dim, sizeof(float));
-      if (fx == NULL) {
-        free(fx);
-        free(coeffs);
-        return -1;
-      }
-      for (size_t i = 0; i < dim; ++i) {
-        fx[i] = cosf((float)M_PI / TB_SIZE_DATA_DIM * (x + 0.5F) * i);
-      }
-      for (size_t j = 0; j < dim; ++j) {
-        fy[j] = cosf((float)M_PI / TB_SIZE_DATA_DIM * (y + 0.5F) * j);
-      }
-      float value = 0.0F;
-      for (size_t j = 0; j < dim; ++j) {
-        for (size_t i = 0; i < (dim - j); ++i) {
-          if (j == 0 && i == 0) {
-            value = coeffs[0];
-          } else {
-            value += coeffs[j * dim + i] * fx[i] * fy[j];
-          }
-        }
-      }
-      if (normalize) {
-        channel[y * TB_SIZE_DATA_DIM + x] = value * 0.5F + 0.5F;
-      } else {
-        channel[y * TB_SIZE_DATA_DIM + x] = value;
-      }
-      free(fy);
-      free(fx);
     }
   }
 
-  free(coeffs);
+  // Normalize the selected AC coefficients
+  if (*scale > 0) {
+    for (int i = 0; i < count; ++i) {
+      // Scale to [-1, 1] and then to [0, 1] for storage
+      (*acs)[i] = 0.5f + 0.5f * ((*acs)[i] / *scale);
+    }
+  }
+
+  free(F);
+  return count;
+}
+
+/**
+ * @brief Performs a standard 2D IDCT-II using a limited set of stored
+ * coefficients.
+ *
+ * @param channel The output spatial data (TB_SIZE_DATA_DIM x TB_SIZE_DATA_DIM).
+ * @param encoded_acs The input array of stored AC coefficients.
+ * @param dim The dimension of the square block of AC coefficients that were
+ * stored (e.g., TB_L_AC_DIM).
+ * @param dc The stored DC coefficient, in [0, 1] range.
+ * @param scale The stored scale factor for the AC coefficients.
+ * @return 0 on success, or -1 on error.
+ */
+static int thumbhash_IDCT(data_channel channel,
+                          const uint8_t* restrict encoded_acs, size_t dim,
+                          float dc, float scale) {
+  const size_t N = TB_SIZE_DATA_DIM;
+
+  // --- Reconstruct the coefficient matrix from the stored hash ---
+  // Create a full coefficient matrix, initialized to zero
+  float* F = calloc(N * N, sizeof(float));
+  if (F == NULL) {
+    return -1;
+  }
+
+  // Unscale and place DC coefficient
+  F[0] = dc * 2.0f - 1.0f;  // from [0, 1] back to [-1, 1]
+
+  // Unscale and place the AC coefficients into their correct positions
+  int ac_idx = 0;
+  for (size_t v = 0; v < dim; ++v) {
+    for (size_t u = 0; u < dim; ++u) {
+      if (u == 0 && v == 0)
+        continue;
+      if (u + v < dim) {
+        float ac_val;
+        // Unpack from bitfield
+        thumbhash_bitfield_to_float(encoded_acs[ac_idx / 2], TB_AC_BITS,
+                                    &ac_val, (ac_idx % 2) * TB_AC_BITS);
+        // Unscale from [0, 1] to [-1, 1], then multiply by scale
+        F[v * N + u] = (ac_val * 2.0f - 1.0f) * scale;
+        ac_idx++;
+      }
+    }
+  }
+
+  // --- Perform standard 2D IDCT (row-column decomposition) ---
+  // 1. 1D IDCT on each column
+  float* temp_matrix = calloc(N * N, sizeof(float));
+  if (temp_matrix == NULL) {
+    free(F);
+    return -1;
+  }
+
+  for (size_t u = 0; u < N; ++u) {
+    for (size_t y = 0; y < N; ++y) {
+      float sum = 0.0f;
+      for (size_t v = 0; v < N; ++v) {
+        sum += C(v) * F[v * N + u] * cosf((float)M_PI / N * (y + 0.5f) * v);
+      }
+      temp_matrix[y * N + u] = sum;
+    }
+  }
+
+  // 2. 1D IDCT on each row of the result from step 1
+  for (size_t y = 0; y < N; ++y) {
+    for (size_t x = 0; x < N; ++x) {
+      float sum = 0.0f;
+      for (size_t u = 0; u < N; ++u) {
+        sum += C(u) * temp_matrix[y * N + u] *
+               cosf((float)M_PI / N * (x + 0.5f) * u);
+      }
+      float final_val = sum * (2.0f / N);
+      channel[y * N + x] = final_val;
+    }
+  }
+
+  free(temp_matrix);
+  free(F);
   return 0;
 }
 
@@ -243,7 +322,7 @@ int thumbhash_encode(struct thumbhash_t* restrict hash,
     hash->l_scale = value;
 
     for (size_t i = 0; i < count; i++) {
-      thumbhash_float_to_bitfield(acs[i / 2], TB_AC_BITS, hash->l_ac,
+      thumbhash_float_to_bitfield(acs[i], TB_AC_BITS, &hash->l_ac[i / 2],
                                   (i % 2) * TB_AC_BITS);
     }
     free(acs);
@@ -264,7 +343,7 @@ int thumbhash_encode(struct thumbhash_t* restrict hash,
     hash->p_scale = value;
 
     for (size_t i = 0; i < count; i++) {
-      thumbhash_float_to_bitfield(acs[i / 2], TB_AC_BITS, hash->p_ac,
+      thumbhash_float_to_bitfield(acs[i], TB_AC_BITS, &hash->p_ac[i / 2],
                                   (i % 2) * TB_AC_BITS);
     }
     free(acs);
@@ -285,7 +364,7 @@ int thumbhash_encode(struct thumbhash_t* restrict hash,
     hash->q_scale = value;
 
     for (size_t i = 0; i < count; i++) {
-      thumbhash_float_to_bitfield(acs[i / 2], TB_AC_BITS, hash->q_ac,
+      thumbhash_float_to_bitfield(acs[i], TB_AC_BITS, &hash->q_ac[i / 2],
                                   (i % 2) * TB_AC_BITS);
     }
     free(acs);
@@ -307,7 +386,7 @@ int thumbhash_encode(struct thumbhash_t* restrict hash,
     hash->a_scale = value;
 
     for (size_t i = 0; i < count; i++) {
-      thumbhash_float_to_bitfield(acs[i / 2], TB_AC_BITS, hash->a_ac,
+      thumbhash_float_to_bitfield(acs[i], TB_AC_BITS, &hash->a_ac[i / 2],
                                   (i % 2) * TB_AC_BITS);
     }
     free(acs);
@@ -339,20 +418,20 @@ int thumbhash_decode(const struct thumbhash_t* restrict hash,
   thumbhash_bitfield_to_float(hash->q_scale, TB_SCALE_BITS, &q_scale, 0);
 
   // Decode luminance channel (6x6 DCT)
-  if (thumbhash_IDCT(ctx.lpqa[CH_L], hash->l_ac, TB_L_AC_DIM, l_dc, l_scale,
-                     1) != 0) {
+  if (thumbhash_IDCT(ctx.lpqa[CH_L], hash->l_ac, TB_L_AC_DIM, l_dc, l_scale) !=
+      0) {
     goto IDCT_err;
   }
 
   // Decode P channel (5x5 DCT)
-  if (thumbhash_IDCT(ctx.lpqa[CH_P], hash->p_ac, TB_P_AC_DIM, p_dc, p_scale,
-                     0) != 0) {
+  if (thumbhash_IDCT(ctx.lpqa[CH_P], hash->p_ac, TB_P_AC_DIM, p_dc, p_scale) !=
+      0) {
     goto IDCT_err;
   }
 
   // Decode Q channel (5x5 DCT)
-  if (thumbhash_IDCT(ctx.lpqa[CH_Q], hash->q_ac, TB_Q_AC_DIM, q_dc, q_scale,
-                     0) != 0) {
+  if (thumbhash_IDCT(ctx.lpqa[CH_Q], hash->q_ac, TB_Q_AC_DIM, q_dc, q_scale) !=
+      0) {
     goto IDCT_err;
   }
 
@@ -361,8 +440,8 @@ int thumbhash_decode(const struct thumbhash_t* restrict hash,
     thumbhash_bitfield_to_float(hash->a_dc, TB_A_DC_BITS, &a_dc, 0);
     thumbhash_bitfield_to_float(hash->a_scale, TB_A_SCALE_BITS, &a_scale, 0);
 
-    if (thumbhash_IDCT(ctx.lpqa[CH_A], hash->a_ac, TB_A_AC_DIM, a_dc, a_scale,
-                       1) != 0) {
+    if (thumbhash_IDCT(ctx.lpqa[CH_A], hash->a_ac, TB_A_AC_DIM, a_dc,
+                       a_scale) != 0) {
       goto IDCT_err;
     }
   } else {
@@ -375,8 +454,8 @@ int thumbhash_decode(const struct thumbhash_t* restrict hash,
   // Convert LPQA back to RGBA
   for (size_t i = 0; i < TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM; i++) {
     float l = ctx.lpqa[CH_L][i];
-    float p = ctx.lpqa[CH_P][i];
-    float q = ctx.lpqa[CH_Q][i];
+    float p = ctx.lpqa[CH_P][i] * 2.0F - 1.0F;
+    float q = ctx.lpqa[CH_Q][i] * 2.0F - 1.0F;
     float a = ctx.lpqa[CH_A][i];
 
     // Convert LPQ to RGB
