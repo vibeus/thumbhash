@@ -52,7 +52,8 @@ static void thumbhash_bitfield_to_float(uint8_t in, size_t bits, float* out,
   assert(shift + bits <= 8);
   uint8_t mask = ((1 << bits) - 1);
   uint8_t value = (in >> shift) & mask;
-  *out = (float)value / (float)mask;
+  float v = (float)value / (float)mask;
+  *out = v;
 }
 
 static int thumbhash_encode_to_context(struct context_t* restrict ctx,
@@ -160,9 +161,7 @@ static int thumbhash_DCT(data_channel channel, size_t dim, float* restrict dc,
 
   // --- Extract, scale, and store the desired coefficients ---
   // DC coefficient (u=0, v=0)
-  // The original range is [-1, 1] for luminance/chrominance, scale to [0, 1]
-  // for storage.
-  *dc = 0.5f + 0.5f * F[0];
+  *dc = F[0] / N;
 
   // AC coefficients
   // Count how many AC coeffs we will store based on the triangular region
@@ -192,7 +191,7 @@ static int thumbhash_DCT(data_channel channel, size_t dim, float* restrict dc,
       if (u == 0 && v == 0)
         continue;
       if (u + v < dim) {
-        float val = F[v * N + u];
+        float val = F[v * N + u] / N;
         *scale = fmaxf(*scale, fabsf(val));
         (*acs)[current_ac++] = val;
       }
@@ -236,7 +235,7 @@ static int thumbhash_IDCT(data_channel channel,
   }
 
   // Unscale and place DC coefficient
-  F[0] = dc * 2.0f - 1.0f;  // from [0, 1] back to [-1, 1]
+  F[0] = dc * N;
 
   // Unscale and place the AC coefficients into their correct positions
   int ac_idx = 0;
@@ -250,7 +249,7 @@ static int thumbhash_IDCT(data_channel channel,
         thumbhash_bitfield_to_float(encoded_acs[ac_idx / 2], TB_AC_BITS,
                                     &ac_val, (ac_idx % 2) * TB_AC_BITS);
         // Unscale from [0, 1] to [-1, 1], then multiply by scale
-        F[v * N + u] = (ac_val * 2.0f - 1.0f) * scale;
+        F[v * N + u] = (ac_val * 2.0f - 1.0f) * scale * N;
         ac_idx++;
       }
     }
