@@ -8,6 +8,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define CH_R 3
+#define CH_G 2
+#define CH_B 1
+#define CH_A 0
+#define CH_L 3
+#define CH_P 2
+#define CH_Q 1
+
 typedef float data_channel[TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM];
 
 static float getChannel(uint32_t pixel, uint8_t channel) {
@@ -42,50 +50,48 @@ static int thumbhash_encode_to_context(struct context_t* restrict ctx,
                                        const uint32_t* restrict data) {
   float avg[4] = {0.0F};
   const size_t data_size = TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM;
-  const size_t R = 0, G = 1, B = 2, A = 3;
-  const size_t L = 0, P = 1, Q = 2;
   const float rdata_size = 1.0 / data_size;
 
   for (size_t i = 0; i < data_size; ++i) {
-    float r = getChannel(data[i], 0);
-    float g = getChannel(data[i], 1);
-    float b = getChannel(data[i], 2);
-    float a = getChannel(data[i], 3);
-    avg[R] += r * a;
-    avg[G] += g * a;
-    avg[B] += b * a;
-    avg[A] += a;
+    float r = getChannel(data[i], CH_R);
+    float g = getChannel(data[i], CH_G);
+    float b = getChannel(data[i], CH_B);
+    float a = getChannel(data[i], CH_A);
+    avg[CH_R] += r * a;
+    avg[CH_G] += g * a;
+    avg[CH_B] += b * a;
+    avg[CH_A] += a;
   }
 
-  if (avg[A] > 0.0F) {
-    avg[R] /= avg[A];
-    avg[G] /= avg[A];
-    avg[B] /= avg[A];
+  if (avg[CH_A] > 0.0F) {
+    avg[CH_R] /= avg[CH_A];
+    avg[CH_G] /= avg[CH_A];
+    avg[CH_B] /= avg[CH_A];
   }
-  avg[R] *= rdata_size;
-  avg[G] *= rdata_size;
-  avg[B] *= rdata_size;
-  avg[A] *= rdata_size;
+  avg[CH_R] *= rdata_size;
+  avg[CH_G] *= rdata_size;
+  avg[CH_B] *= rdata_size;
+  avg[CH_A] *= rdata_size;
 
-  ctx->has_alpha = avg[A] < 1.0F;
+  ctx->has_alpha = avg[CH_A] < 1.0F;
 
   ctx->lpqa = calloc(4, sizeof(data_channel));
   if (ctx->lpqa == NULL) {
     return -1;
   }
   for (size_t i = 0; i < data_size; ++i) {
-    float r = getChannel(data[i], 0);
-    float g = getChannel(data[i], 1);
-    float b = getChannel(data[i], 2);
-    float a = getChannel(data[i], 3);
+    float r = getChannel(data[i], CH_R);
+    float g = getChannel(data[i], CH_G);
+    float b = getChannel(data[i], CH_B);
+    float a = getChannel(data[i], CH_A);
     // do a ATOP mix over avg
-    float mix_r = avg[R] * (1 - a) + r * a;
-    float mix_g = avg[G] * (1 - a) + g * a;
-    float mix_b = avg[B] * (1 - a) + b * a;
-    ctx->lpqa[L][i] = (mix_r + mix_g + mix_b) / 3.0F;
-    ctx->lpqa[P][i] = (mix_r + mix_g) * 0.5F - mix_b;
-    ctx->lpqa[Q][i] = (mix_r - mix_g);
-    ctx->lpqa[A][i] = a;
+    float mix_r = avg[CH_R] * (1 - a) + r * a;
+    float mix_g = avg[CH_G] * (1 - a) + g * a;
+    float mix_b = avg[CH_B] * (1 - a) + b * a;
+    ctx->lpqa[CH_L][i] = (mix_r + mix_g + mix_b) / 3.0F;
+    ctx->lpqa[CH_P][i] = (mix_r + mix_g) * 0.5F - mix_b;
+    ctx->lpqa[CH_Q][i] = (mix_r - mix_g);
+    ctx->lpqa[CH_A][i] = a;
   }
   return 0;
 }
@@ -201,7 +207,7 @@ int thumbhash_encode(struct thumbhash_t* restrict hash,
     float dc = 0.0F;
     float scale = 0.0F;
     float* acs;
-    int count = thumbhash_DCT(ctx.lpqa[0], TB_L_AC_DIM, &dc, &scale, &acs);
+    int count = thumbhash_DCT(ctx.lpqa[CH_L], TB_L_AC_DIM, &dc, &scale, &acs);
     if (count < 0) {
       goto DCT_err;
     }
@@ -218,33 +224,11 @@ int thumbhash_encode(struct thumbhash_t* restrict hash,
     }
     free(acs);
   }
-  if (ctx.has_alpha) {  // A channel
-    hash->has_alpha = 1;
-    float dc = 0.0F;
-    float scale = 0.0F;
-    float* acs;
-    int count = thumbhash_DCT(ctx.lpqa[3], TB_A_AC_DIM, &dc, &scale, &acs);
-    if (count < 0) {
-      goto DCT_err;
-    }
-    uint8_t value = 0;
-    thumbhash_float_to_bitfield(dc, TB_A_DC_BITS, &value, 0);
-    hash->a_dc = value;
-    value = 0;
-    thumbhash_float_to_bitfield(scale, TB_A_SCALE_BITS, &value, 0);
-    hash->a_scale = value;
-
-    for (size_t i = 0; i < count; i++) {
-      thumbhash_float_to_bitfield(acs[i / 2], TB_AC_BITS, hash->a_ac,
-                                  (i % 2) * TB_AC_BITS);
-    }
-    free(acs);
-  }
   {  // P channel
     float dc = 0.0F;
     float scale = 0.0F;
     float* acs;
-    int count = thumbhash_DCT(ctx.lpqa[1], TB_P_AC_DIM, &dc, &scale, &acs);
+    int count = thumbhash_DCT(ctx.lpqa[CH_P], TB_P_AC_DIM, &dc, &scale, &acs);
     if (count < 0) {
       goto DCT_err;
     }
@@ -265,7 +249,7 @@ int thumbhash_encode(struct thumbhash_t* restrict hash,
     float dc = 0.0F;
     float scale = 0.0F;
     float* acs;
-    int count = thumbhash_DCT(ctx.lpqa[2], TB_Q_AC_DIM, &dc, &scale, &acs);
+    int count = thumbhash_DCT(ctx.lpqa[CH_Q], TB_Q_AC_DIM, &dc, &scale, &acs);
     if (count < 0) {
       goto DCT_err;
     }
@@ -278,6 +262,28 @@ int thumbhash_encode(struct thumbhash_t* restrict hash,
 
     for (size_t i = 0; i < count; i++) {
       thumbhash_float_to_bitfield(acs[i / 2], TB_AC_BITS, hash->q_ac,
+                                  (i % 2) * TB_AC_BITS);
+    }
+    free(acs);
+  }
+  if (ctx.has_alpha) {  // A channel
+    hash->has_alpha = 1;
+    float dc = 0.0F;
+    float scale = 0.0F;
+    float* acs;
+    int count = thumbhash_DCT(ctx.lpqa[CH_A], TB_A_AC_DIM, &dc, &scale, &acs);
+    if (count < 0) {
+      goto DCT_err;
+    }
+    uint8_t value = 0;
+    thumbhash_float_to_bitfield(dc, TB_A_DC_BITS, &value, 0);
+    hash->a_dc = value;
+    value = 0;
+    thumbhash_float_to_bitfield(scale, TB_A_SCALE_BITS, &value, 0);
+    hash->a_scale = value;
+
+    for (size_t i = 0; i < count; i++) {
+      thumbhash_float_to_bitfield(acs[i / 2], TB_AC_BITS, hash->a_ac,
                                   (i % 2) * TB_AC_BITS);
     }
     free(acs);
@@ -311,19 +317,19 @@ int thumbhash_decode(const struct thumbhash_t* restrict hash,
   thumbhash_bitfield_to_float(hash->q_scale, TB_SCALE_BITS, &q_scale, 0);
 
   // Decode luminance channel (6x6 DCT)
-  if (thumbhash_IDCT(ctx.lpqa[0], hash->l_ac, TB_L_AC_DIM, l_dc, l_scale) !=
+  if (thumbhash_IDCT(ctx.lpqa[CH_L], hash->l_ac, TB_L_AC_DIM, l_dc, l_scale) !=
       0) {
     goto IDCT_err;
   }
 
   // Decode P channel (5x5 DCT)
-  if (thumbhash_IDCT(ctx.lpqa[1], hash->p_ac, TB_P_AC_DIM, p_dc, p_scale) !=
+  if (thumbhash_IDCT(ctx.lpqa[CH_P], hash->p_ac, TB_P_AC_DIM, p_dc, p_scale) !=
       0) {
     goto IDCT_err;
   }
 
   // Decode Q channel (5x5 DCT)
-  if (thumbhash_IDCT(ctx.lpqa[2], hash->q_ac, TB_Q_AC_DIM, q_dc, q_scale) !=
+  if (thumbhash_IDCT(ctx.lpqa[CH_Q], hash->q_ac, TB_Q_AC_DIM, q_dc, q_scale) !=
       0) {
     goto IDCT_err;
   }
@@ -332,33 +338,33 @@ int thumbhash_decode(const struct thumbhash_t* restrict hash,
   if (ctx.has_alpha) {
     thumbhash_bitfield_to_float(hash->a_dc, 4, &a_dc, 0);
     thumbhash_bitfield_to_float(hash->a_scale, 4, &a_scale, 0);
-    if (thumbhash_IDCT(ctx.lpqa[3], hash->a_ac, TB_A_AC_DIM, a_dc, a_scale) !=
-        0) {
+    if (thumbhash_IDCT(ctx.lpqa[CH_A], hash->a_ac, TB_A_AC_DIM, a_dc,
+                       a_scale) != 0) {
       goto IDCT_err;
     }
   } else {
     // Fill with opaque alpha if no alpha channel
     for (size_t i = 0; i < TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM; i++) {
-      ctx.lpqa[3][i] = 1.0F;
+      ctx.lpqa[CH_A][i] = 1.0F;
     }
   }
 
   // Convert LPQA back to RGBA
   for (size_t i = 0; i < TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM; i++) {
-    float l = ctx.lpqa[0][i];
-    float p = ctx.lpqa[1][i];
-    float q = ctx.lpqa[2][i];
-    float a = ctx.lpqa[3][i];
+    float l = ctx.lpqa[CH_L][i];
+    float p = ctx.lpqa[CH_P][i];
+    float q = ctx.lpqa[CH_Q][i];
+    float a = ctx.lpqa[CH_A][i];
 
     // Convert LPQ to RGB
     float b = l - 2.0F / 3.0F * p;
     float r = (3.0F * l - b + q) / 2.0F;
     float g = r - q;
 
-    setChannel(r, &data[i], 0);
-    setChannel(g, &data[i], 1);
-    setChannel(b, &data[i], 2);
-    setChannel(a, &data[i], 3);
+    setChannel(r, &data[i], CH_R);
+    setChannel(g, &data[i], CH_G);
+    setChannel(b, &data[i], CH_B);
+    setChannel(a, &data[i], CH_A);
   }
 
   free(ctx.lpqa);
