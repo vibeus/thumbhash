@@ -61,10 +61,10 @@ void thumbhash_init(struct thumbhash_t* RESTRICT hash);
 // Encode a RGBA image into a thumbhash_t structure. The function takes a
 // pointer to the input image data and write to the output hash structure.
 // hash should be initialized before calling this function.
-void thumbhash_encode(struct thumbhash_t* RESTRICT hash,
-                      const uint32_t* RESTRICT data);
-void thumbhash_decode(const struct thumbhash_t* RESTRICT hash,
-                      uint32_t* RESTRICT data);
+int thumbhash_encode(struct thumbhash_t* RESTRICT hash,
+                     const uint32_t* RESTRICT data);
+int thumbhash_decode(const struct thumbhash_t* RESTRICT hash,
+                     uint32_t* RESTRICT data);
 
 // convert a thumbhash_t structure to a byte array. The function takes a pointer
 // to the output byte
