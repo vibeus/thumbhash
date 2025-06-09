@@ -29,6 +29,8 @@ extern "C" {
 #define TB_P_AC_DIM 5
 #define TB_Q_AC_DIM 5
 #define TB_A_AC_DIM 6
+#define TB_DCT_ERROR -2
+#define TB_IDCT_ERROR -3
 // we use a different approach to original algorithm
 // luminance and alpha channel are encoded with fixed terms
 // this will generate a fixed sized hash will a small extra space
