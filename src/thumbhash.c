@@ -8,13 +8,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define CH_R 3
-#define CH_G 2
-#define CH_B 1
-#define CH_A 0
-#define CH_L 3
-#define CH_P 2
-#define CH_Q 1
+#define CH_R 0
+#define CH_G 1
+#define CH_B 2
+#define CH_A 3
+#define CH_L 0
+#define CH_P 1
+#define CH_Q 2
 
 typedef float data_channel[TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM];
 
