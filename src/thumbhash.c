@@ -15,12 +15,29 @@
 #define CH_L 0
 #define CH_P 1
 #define CH_Q 2
+#define TB_MAX_AC_DIM 6
 
 typedef float data_channel[TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM];
 
-// Helper for the DCT/IDCT normalization factor
-static inline float C(int k) {
-  return k == 0 ? 1.0F / sqrtf(2.0F) : 1.0F;
+static float CT[TB_MAX_AC_DIM][TB_SIZE_DATA_DIM];
+
+static void init_cos_table() {
+  if (CT[0][0] != 0) {
+    return;
+  }
+  float pi_n = M_PI / TB_SIZE_DATA_DIM;
+  for (size_t u = 0; u < TB_MAX_AC_DIM; ++u) {
+    for (size_t x = 0; x < TB_SIZE_DATA_DIM; ++x) {
+      CT[u][x] = cosf(pi_n * (x + 0.5f) * u);
+    }
+  }
+}
+
+static float C(int k) {
+  if (k == 0) {
+    return 1;
+  }
+  return sqrt(2.0F);
 }
 
 static uint32_t getChannelI(uint32_t pixel, uint8_t channel) {
@@ -117,97 +134,40 @@ static int thumbhash_DCT(data_channel channel, size_t dim, float* restrict dc,
                          float* restrict scale, float** restrict acs) {
   const size_t N = TB_SIZE_DATA_DIM;
 
-  // Temporary matrix to hold the full set of DCT coefficients
-  float* F = calloc(N * N, sizeof(float));
-  if (F == NULL) {
+  float* coeff = calloc(dim * dim, sizeof(float));
+  if (coeff == NULL) {
     return -1;
   }
-
-  // --- Perform standard 2D DCT (row-column decomposition) ---
-  // 1. 1D DCT on each row
-  for (size_t v = 0; v < N; ++v) {
-    for (size_t u = 0; u < N; ++u) {
-      float sum = 0.0f;
-      for (size_t x = 0; x < N; ++x) {
-        sum += channel[v * N + x] * cosf((float)M_PI / N * (x + 0.5f) * u);
-      }
-      F[v * N + u] = sum;
-    }
-  }
-
-  // 2. 1D DCT on each column of the result from step 1
-  float* temp_col = malloc(N * sizeof(float));
-  if (temp_col == NULL) {
-    free(F);
-    return -1;
-  }
-
-  for (size_t u = 0; u < N; ++u) {
-    // copy column u into a temporary buffer
-    for (size_t v = 0; v < N; v++) {
-      temp_col[v] = F[v * N + u];
-    }
-
-    for (size_t v = 0; v < N; v++) {
-      float sum = 0.0f;
+  *acs = coeff;
+  int coeff_size = 0;
+  *scale = 0.0F;
+  for (size_t v = 0; v < dim; ++v) {
+    for (size_t u = 0; u + v < dim; ++u) {
+      float sum = 0.0F;
       for (size_t y = 0; y < N; ++y) {
-        sum += temp_col[y] * cosf((float)M_PI / N * (y + 0.5f) * v);
+        for (size_t x = 0; x < N; ++x) {
+          sum += C(u) * C(v) * CT[u][x] * CT[v][y] * channel[y * N + x];
+        }
       }
-      // Apply normalization factors and store final coefficient
-      F[v * N + u] = (2.0f / N) * C(u) * C(v) * sum;
-    }
-  }
-  free(temp_col);
-
-  // --- Extract, scale, and store the desired coefficients ---
-  // DC coefficient (u=0, v=0)
-  *dc = F[0] / N;
-
-  // AC coefficients
-  // Count how many AC coeffs we will store based on the triangular region
-  int count = 0;
-  for (size_t v = 0; v < dim; ++v) {
-    for (size_t u = 0; u < dim; ++u) {
-      if (u == 0 && v == 0)
-        continue;  // Skip DC
-      // Use `u + v < dim` to select a triangular region of low-frequency
-      // coefficients
-      if (u + v < dim) {
-        count++;
+      sum /= N * N;
+      if (v == 0 && u == 0) {
+        *dc = sum;
+      } else {
+        float ac = sum;
+        coeff[coeff_size++] = ac;
+        *scale = fmaxf(*scale, fabsf(ac));
       }
     }
   }
 
-  *acs = calloc(count, sizeof(float));
-  if (*acs == NULL) {
-    free(F);
-    return -1;
+  for (size_t i = 0; i < coeff_size; ++i) {
+    // scale to [0, 1] for storage
+    coeff[i] = coeff[i] / *scale * 0.5F + 0.5F;
   }
+  // compensate for quantization error
+  *scale *= 1.15F;
 
-  *scale = 0.0f;
-  int current_ac = 0;
-  for (size_t v = 0; v < dim; ++v) {
-    for (size_t u = 0; u < dim; ++u) {
-      if (u == 0 && v == 0)
-        continue;
-      if (u + v < dim) {
-        float val = F[v * N + u] / N;
-        *scale = fmaxf(*scale, fabsf(val));
-        (*acs)[current_ac++] = val;
-      }
-    }
-  }
-
-  // Normalize the selected AC coefficients
-  if (*scale > 0) {
-    for (int i = 0; i < count; ++i) {
-      // Scale to [-1, 1] and then to [0, 1] for storage
-      (*acs)[i] = 0.5f + 0.5f * ((*acs)[i] / *scale);
-    }
-  }
-
-  free(F);
-  return count;
+  return coeff_size;
 }
 
 /**
@@ -227,67 +187,42 @@ static int thumbhash_IDCT(data_channel channel,
                           float dc, float scale) {
   const size_t N = TB_SIZE_DATA_DIM;
 
-  // --- Reconstruct the coefficient matrix from the stored hash ---
-  // Create a full coefficient matrix, initialized to zero
-  float* F = calloc(N * N, sizeof(float));
-  if (F == NULL) {
-    return -1;
-  }
-
-  // Unscale and place DC coefficient
-  F[0] = dc * N;
+  float coeff[dim * dim];
 
   // Unscale and place the AC coefficients into their correct positions
   int ac_idx = 0;
   for (size_t v = 0; v < dim; ++v) {
-    for (size_t u = 0; u < dim; ++u) {
-      if (u == 0 && v == 0)
-        continue;
-      if (u + v < dim) {
+    for (size_t u = 0; u + v < dim; ++u) {
+      if (u == 0 && v == 0) {
+        coeff[0] = dc * N;
+      } else {
         float ac_val;
         // Unpack from bitfield
         thumbhash_bitfield_to_float(encoded_acs[ac_idx / 2], TB_AC_BITS,
                                     &ac_val, (ac_idx % 2) * TB_AC_BITS);
         // Unscale from [0, 1] to [-1, 1], then multiply by scale
-        F[v * N + u] = (ac_val * 2.0f - 1.0f) * scale * N;
+        coeff[v * dim + u] = (ac_val * 2.0f - 1.0f) * scale * N;
         ac_idx++;
       }
     }
   }
 
-  // --- Perform standard 2D IDCT (row-column decomposition) ---
-  // 1. 1D IDCT on each column
-  float* temp_matrix = calloc(N * N, sizeof(float));
-  if (temp_matrix == NULL) {
-    free(F);
-    return -1;
-  }
-
-  for (size_t u = 0; u < N; ++u) {
-    for (size_t y = 0; y < N; ++y) {
-      float sum = 0.0f;
-      for (size_t v = 0; v < N; ++v) {
-        sum += C(v) * F[v * N + u] * cosf((float)M_PI / N * (y + 0.5f) * v);
-      }
-      temp_matrix[y * N + u] = sum;
-    }
-  }
-
-  // 2. 1D IDCT on each row of the result from step 1
   for (size_t y = 0; y < N; ++y) {
     for (size_t x = 0; x < N; ++x) {
       float sum = 0.0f;
-      for (size_t u = 0; u < N; ++u) {
-        sum += C(u) * temp_matrix[y * N + u] *
-               cosf((float)M_PI / N * (x + 0.5f) * u);
+      for (size_t v = 0; v < dim; ++v) {
+        for (size_t u = 0; u < dim; ++u) {
+          if (u + v < dim) {
+            float cu = 1.0F / C(u);
+            float cv = 1.0F / C(v);
+            sum += cu * cv * coeff[v * dim + u] * CT[u][x] * CT[v][y];
+          }
+        }
       }
-      float final_val = sum * (2.0f / N);
-      channel[y * N + x] = final_val;
+      channel[y * N + x] = sum / N;
     }
   }
 
-  free(temp_matrix);
-  free(F);
   return 0;
 }
 
@@ -301,6 +236,7 @@ uint32_t* thumbhash_allocate_data() {
 
 int thumbhash_encode(struct thumbhash_t* restrict hash,
                      const uint32_t* restrict data) {
+  init_cos_table();
   struct context_t ctx;
   if (thumbhash_encode_to_context(&ctx, data) != 0) {
     return -1;
@@ -399,6 +335,7 @@ DCT_err:
 
 int thumbhash_decode(const struct thumbhash_t* restrict hash,
                      uint32_t* restrict data) {
+  init_cos_table();
   struct context_t ctx;
   ctx.has_alpha = hash->has_alpha;
   ctx.lpqa = calloc(4, sizeof(data_channel));
