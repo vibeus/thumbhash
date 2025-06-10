@@ -3,6 +3,7 @@
 #include "thumbhash/thumbhash.h"
 #include <assert.h>
 #include <math.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -17,66 +18,73 @@
 #define CH_Q 2
 #define TB_MAX_AC_DIM 6
 
-typedef float data_channel[TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM];
+typedef float data_channel[TB_DATA_DIM * TB_DATA_DIM];
 
-static float CT[TB_MAX_AC_DIM][TB_SIZE_DATA_DIM];
+static float CT[TB_MAX_AC_DIM][TB_DATA_DIM];
+
+struct context_t {
+  data_channel lpqa[4];
+  bool has_alpha;
+};
 
 static void init_cos_table() {
   if (CT[0][0] != 0) {
     return;
   }
-  float pi_n = M_PI / TB_SIZE_DATA_DIM;
+  float pi_n = M_PI / TB_DATA_DIM;
   for (size_t u = 0; u < TB_MAX_AC_DIM; ++u) {
-    for (size_t x = 0; x < TB_SIZE_DATA_DIM; ++x) {
+    for (size_t x = 0; x < TB_DATA_DIM; ++x) {
       CT[u][x] = cosf(pi_n * (x + 0.5f) * u);
     }
   }
 }
 
-static float C(int k) {
+static inline float C(int k) {
   if (k == 0) {
     return 1;
   }
   return sqrt(2.0F);
 }
 
-static uint32_t getChannelI(uint32_t pixel, uint8_t channel) {
+// Convert value from [-1,1] range to [0,1] range
+static inline float to_unit(float v) {
+  return v * 0.5F + 0.5F;
+}
+
+// Convert value from [0,1] range to [-1,1] range
+static inline float from_unit(float v) {
+  return v * 2.0F - 1.0F;
+}
+
+static inline uint32_t getChannelI(uint32_t pixel, uint8_t channel) {
   return (pixel >> (channel * 8)) & 0xFF;
 }
 
-static float getChannel(uint32_t pixel, uint8_t channel) {
+static inline float getChannel(uint32_t pixel, uint8_t channel) {
   return getChannelI(pixel, channel) / 255.0F;
 }
 
-static void setChannel(float value, uint32_t* pixel, uint8_t channel) {
+static inline void setChannel(float value, uint32_t* pixel, uint8_t channel) {
   uint8_t clamped = (uint8_t)(fminf(fmaxf(0.0F, value), 1.0F) * 255.0F);
   *pixel |= (clamped << (channel * 8));
 }
 
-struct context_t {
-  _Bool has_alpha;
-  data_channel* lpqa;
-};
-
-static void thumbhash_float_to_bitfield(float in, size_t bits, uint8_t* out,
-                                        size_t shift) {
+static inline uint8_t quantize(float in, size_t bits, size_t shift) {
   assert(shift + bits <= 8);
-  *out = *out | (uint8_t)(in * (float)((1 << bits) - 1)) << shift;
+  return (uint8_t)(in * (float)((1 << bits) - 1)) << shift;
 }
 
-static void thumbhash_bitfield_to_float(uint8_t in, size_t bits, float* out,
-                                        size_t shift) {
+static inline float dequantize(uint8_t in, size_t bits, size_t shift) {
   assert(shift + bits <= 8);
   uint8_t mask = ((1 << bits) - 1);
   uint8_t value = (in >> shift) & mask;
-  float v = (float)value / (float)mask;
-  *out = v;
+  return (float)value / (float)mask;
 }
 
-static int thumbhash_encode_to_context(struct context_t* restrict ctx,
-                                       const uint32_t* restrict data) {
+static int thumbhashp_encode_to_context(struct context_t* restrict ctx,
+                                        const uint32_t* restrict data) {
   uint32_t avg[4] = {0};
-  const size_t data_size = TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM;
+  const size_t data_size = TB_DATA_DIM * TB_DATA_DIM;
   const size_t data_size_shift = 14;
 
   for (size_t i = 0; i < data_size; ++i) {
@@ -96,10 +104,6 @@ static int thumbhash_encode_to_context(struct context_t* restrict ctx,
 
   ctx->has_alpha = avg[CH_A] < 255;
 
-  ctx->lpqa = calloc(4, sizeof(data_channel));
-  if (ctx->lpqa == NULL) {
-    return -1;
-  }
   for (size_t i = 0; i < data_size; ++i) {
     float r = getChannel(data[i], CH_R);
     float g = getChannel(data[i], CH_G);
@@ -110,37 +114,44 @@ static int thumbhash_encode_to_context(struct context_t* restrict ctx,
     float mix_g = (float)(avg[CH_G] / 255.0F) * (1 - a) + g * a;
     float mix_b = (float)(avg[CH_B] / 255.0F) * (1 - a) + b * a;
     ctx->lpqa[CH_L][i] = (mix_r + mix_g + mix_b) / 3.0F;
-    ctx->lpqa[CH_P][i] =
-        ((mix_r + mix_g) * 0.5F - mix_b) * 0.5F + 0.5F;  // scale to [0, 1]
-    ctx->lpqa[CH_Q][i] = (mix_r - mix_g) * 0.5F + 0.5F;  // scale to [0, 1]
+    ctx->lpqa[CH_P][i] = to_unit((mix_r + mix_g) * 0.5F - mix_b);
+    ctx->lpqa[CH_Q][i] = to_unit(mix_r - mix_g);
     ctx->lpqa[CH_A][i] = a;
   }
   return 0;
 }
 
 /**
- * @brief Performs a standard 2D DCT-II on a channel and stores a limited
- * set of coefficients.
+ * @brief Performs a 2D DCT-II transform on image channel data and stores
+ * compressed coefficients.
  *
- * @param channel The input spatial data (TB_SIZE_DATA_DIM x TB_SIZE_DATA_DIM).
- * @param dim The dimension of the square block of AC coefficients to store
- * (e.g., TB_L_AC_DIM).
- * @param dc The output DC coefficient, scaled to [0, 1].
- * @param scale The output scale factor for the AC coefficients.
- * @param acs The output array of selected AC coefficients, scaled to [0, 1].
- * @return The number of AC coefficients written, or -1 on error.
+ * The function computes the Discrete Cosine Transform (type II) of the input
+ * channel data, quantizes the coefficients, and stores them in a compact format
+ * suitable for thumbhashp.
+ *
+ * @param channel Input image channel data (TB_DATA_DIM x TB_DATA_DIM
+ * array)
+ * @param dim Dimension of the AC coefficients block to store (must be <=
+ * TB_MAX_AC_DIM)
+ * @param[out] dc Output DC coefficient (quantized to TB_DC_BITS bits)
+ * @param[out] scale Output scale factor for AC coefficients (quantized to
+ * TB_SCALE_BITS bits)
+ * @param[out] acs Output array for packed AC coefficients (each stored in
+ * TB_AC_BITS bits)
+ *
+ * @note The function stores AC coefficients in a triangular pattern (u + v <
+ * dim)
+ * @note A 15% scale boost is applied to compensate for quantization errors
  */
-static int thumbhash_DCT(data_channel channel, size_t dim, float* restrict dc,
-                         float* restrict scale, float** restrict acs) {
-  const size_t N = TB_SIZE_DATA_DIM;
+static void channelDCT(const data_channel channel, size_t dim,
+                       uint8_t* restrict dc, uint8_t* restrict scale,
+                       uint8_t* restrict acs) {
+  const size_t N = TB_DATA_DIM;
 
-  float* coeff = calloc(dim * dim, sizeof(float));
-  if (coeff == NULL) {
-    return -1;
-  }
-  *acs = coeff;
+  float coeff[dim * dim];
+
   int coeff_size = 0;
-  *scale = 0.0F;
+  float s = 0.0F;
   for (size_t v = 0; v < dim; ++v) {
     for (size_t u = 0; u + v < dim; ++u) {
       float sum = 0.0F;
@@ -151,57 +162,65 @@ static int thumbhash_DCT(data_channel channel, size_t dim, float* restrict dc,
       }
       sum /= N * N;
       if (v == 0 && u == 0) {
-        *dc = sum;
+        *dc = quantize(sum, TB_DC_BITS, 0);
       } else {
         float ac = sum;
         coeff[coeff_size++] = ac;
-        *scale = fmaxf(*scale, fabsf(ac));
+        s = fmaxf(s, fabsf(ac));
       }
     }
   }
 
   for (size_t i = 0; i < coeff_size; ++i) {
     // scale to [0, 1] for storage
-    coeff[i] = coeff[i] / *scale * 0.5F + 0.5F;
+    acs[i / 2] |=
+        quantize(to_unit(coeff[i] / s), TB_AC_BITS, TB_AC_BITS * (i & 1));
   }
   // compensate for quantization error
-  *scale *= 1.15F;
-
-  return coeff_size;
+  s *= 1.15F;
+  *scale = quantize(s, TB_SCALE_BITS, 0);
 }
 
 /**
- * @brief Performs a standard 2D IDCT-II using a limited set of stored
- * coefficients.
+ * @brief Performs a 2D Inverse Discrete Cosine Transform (type III) using
+ * stored coefficients.
  *
- * @param channel The output spatial data (TB_SIZE_DATA_DIM x TB_SIZE_DATA_DIM).
- * @param encoded_acs The input array of stored AC coefficients.
- * @param dim The dimension of the square block of AC coefficients that were
- * stored (e.g., TB_L_AC_DIM).
- * @param dc The stored DC coefficient, in [0, 1] range.
- * @param scale The stored scale factor for the AC coefficients.
- * @return 0 on success, or -1 on error.
+ * Reconstructs spatial domain data from quantized DCT coefficients stored in
+ * thumbhashp format. The function handles both DC and AC coefficients, applying
+ * proper scaling and dequantization.
+ *
+ * @param[out] channel Output spatial data (TB_DATA_DIM x TB_DATA_DIM
+ * array)
+ * @param encoded_acs Packed AC coefficients array (each stored in TB_AC_BITS
+ * bits)
+ * @param dim Dimension of the AC coefficients block (must match encoding
+ * dimension)
+ * @param dc Quantized DC coefficient (stored in TB_DC_BITS bits)
+ * @param scale Quantized scale factor for AC coefficients (stored in
+ * TB_SCALE_BITS bits)
+ *
+ * @note The function reconstructs coefficients in a triangular pattern (u + v <
+ * dim)
  */
-static int thumbhash_IDCT(data_channel channel,
-                          const uint8_t* restrict encoded_acs, size_t dim,
-                          float dc, float scale) {
-  const size_t N = TB_SIZE_DATA_DIM;
+static void channelIDCT(data_channel channel,
+                        const uint8_t* restrict encoded_acs, size_t dim,
+                        uint8_t dc, uint8_t scale) {
+  const size_t N = TB_DATA_DIM;
 
   float coeff[dim * dim];
 
   // Unscale and place the AC coefficients into their correct positions
   int ac_idx = 0;
+  float s = dequantize(scale, TB_SCALE_BITS, 0);
   for (size_t v = 0; v < dim; ++v) {
     for (size_t u = 0; u + v < dim; ++u) {
       if (u == 0 && v == 0) {
-        coeff[0] = dc * N;
+        coeff[0] = dequantize(dc, TB_DC_BITS, 0) * N;
       } else {
-        float ac_val;
-        // Unpack from bitfield
-        thumbhash_bitfield_to_float(encoded_acs[ac_idx / 2], TB_AC_BITS,
-                                    &ac_val, (ac_idx % 2) * TB_AC_BITS);
+        float ac_val = from_unit(dequantize(encoded_acs[ac_idx / 2], TB_AC_BITS,
+                                            (ac_idx % 2) * TB_AC_BITS));
         // Unscale from [0, 1] to [-1, 1], then multiply by scale
-        coeff[v * dim + u] = (ac_val * 2.0f - 1.0f) * scale * N;
+        coeff[v * dim + u] = ac_val * s * N;
         ac_idx++;
       }
     }
@@ -222,177 +241,85 @@ static int thumbhash_IDCT(data_channel channel,
       channel[y * N + x] = sum / N;
     }
   }
-
-  return 0;
 }
 
-void thumbhash_init(struct thumbhash_t* restrict hash) {
-  memset(hash, 0, sizeof(struct thumbhash_t));
+void thumbhashp_init(struct thumbhashp_t* restrict hash) {
+  memset(hash, 0, sizeof(struct thumbhashp_t));
 }
 
-uint32_t* thumbhash_allocate_data() {
-  return malloc(sizeof(uint32_t) * TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM);
+uint32_t* thumbhashp_allocate_data() {
+  return malloc(sizeof(uint32_t) * TB_DATA_DIM * TB_DATA_DIM);
 }
 
-int thumbhash_encode(struct thumbhash_t* restrict hash,
-                     const uint32_t* restrict data) {
+int thumbhashp_encode(struct thumbhashp_t* restrict hash,
+                      const uint32_t* restrict data) {
   init_cos_table();
-  struct context_t ctx;
-  if (thumbhash_encode_to_context(&ctx, data) != 0) {
+  struct context_t* ctx = calloc(1, sizeof(struct context_t));
+  if (ctx == NULL) {
+    return -1;
+  }
+  if (thumbhashp_encode_to_context(ctx, data) != 0) {
     return -1;
   }
   {  // L channel
-    float dc = 0.0F;
-    float scale = 0.0F;
-    float* acs;
-    int count = thumbhash_DCT(ctx.lpqa[CH_L], TB_L_AC_DIM, &dc, &scale, &acs);
-    if (count < 0) {
-      goto DCT_err;
-    }
-    uint8_t value = 0;
-    thumbhash_float_to_bitfield(dc, TB_DC_BITS, &value, 0);
-    hash->l_dc = value;
-    value = 0;
-    thumbhash_float_to_bitfield(scale, TB_SCALE_BITS, &value, 0);
-    hash->l_scale = value;
-
-    for (size_t i = 0; i < count; i++) {
-      thumbhash_float_to_bitfield(acs[i], TB_AC_BITS, &hash->l_ac[i / 2],
-                                  (i % 2) * TB_AC_BITS);
-    }
-    free(acs);
+    uint8_t dc = 0;
+    uint8_t scale = 0;
+    channelDCT(ctx->lpqa[CH_L], TB_L_AC_DIM, &dc, &scale, hash->l_ac);
+    hash->l_dc = dc;
+    hash->l_scale = scale;
   }
   {  // P channel
-    float dc = 0.0F;
-    float scale = 0.0F;
-    float* acs;
-    int count = thumbhash_DCT(ctx.lpqa[CH_P], TB_P_AC_DIM, &dc, &scale, &acs);
-    if (count < 0) {
-      goto DCT_err;
-    }
-    uint8_t value = 0;
-    thumbhash_float_to_bitfield(dc, TB_DC_BITS, &value, 0);
-    hash->p_dc = value;
-    value = 0;
-    thumbhash_float_to_bitfield(scale, TB_SCALE_BITS, &value, 0);
-    hash->p_scale = value;
-
-    for (size_t i = 0; i < count; i++) {
-      thumbhash_float_to_bitfield(acs[i], TB_AC_BITS, &hash->p_ac[i / 2],
-                                  (i % 2) * TB_AC_BITS);
-    }
-    free(acs);
+    uint8_t dc = 0;
+    uint8_t scale = 0;
+    channelDCT(ctx->lpqa[CH_P], TB_P_AC_DIM, &dc, &scale, hash->p_ac);
+    hash->p_dc = dc;
+    hash->p_scale = scale;
   }
   {  // Q channel
-    float dc = 0.0F;
-    float scale = 0.0F;
-    float* acs;
-    int count = thumbhash_DCT(ctx.lpqa[CH_Q], TB_Q_AC_DIM, &dc, &scale, &acs);
-    if (count < 0) {
-      goto DCT_err;
-    }
-    uint8_t value = 0;
-    thumbhash_float_to_bitfield(dc, TB_DC_BITS, &value, 0);
-    hash->q_dc = value;
-    value = 0;
-    thumbhash_float_to_bitfield(scale, TB_SCALE_BITS, &value, 0);
-    hash->q_scale = value;
-
-    for (size_t i = 0; i < count; i++) {
-      thumbhash_float_to_bitfield(acs[i], TB_AC_BITS, &hash->q_ac[i / 2],
-                                  (i % 2) * TB_AC_BITS);
-    }
-    free(acs);
+    uint8_t dc = 0;
+    uint8_t scale = 0;
+    channelDCT(ctx->lpqa[CH_Q], TB_Q_AC_DIM, &dc, &scale, hash->q_ac);
+    hash->q_dc = dc;
+    hash->q_scale = scale;
   }
-  if (ctx.has_alpha) {  // A channel
-    hash->has_alpha = 1;
-    float dc = 0.0F;
-    float scale = 0.0F;
-    float* acs;
-    int count = thumbhash_DCT(ctx.lpqa[CH_A], TB_A_AC_DIM, &dc, &scale, &acs);
-    if (count < 0) {
-      goto DCT_err;
-    }
-    uint8_t value = 0;
-    thumbhash_float_to_bitfield(dc, TB_A_DC_BITS, &value, 0);
-    hash->a_dc = value;
-    value = 0;
-    thumbhash_float_to_bitfield(scale, TB_A_SCALE_BITS, &value, 0);
-    hash->a_scale = value;
-
-    for (size_t i = 0; i < count; i++) {
-      thumbhash_float_to_bitfield(acs[i], TB_AC_BITS, &hash->a_ac[i / 2],
-                                  (i % 2) * TB_AC_BITS);
-    }
-    free(acs);
+  if (ctx->has_alpha) {  // A channel
+    uint8_t dc = 0;
+    uint8_t scale = 0;
+    channelDCT(ctx->lpqa[CH_A], TB_A_AC_DIM, &dc, &scale, hash->a_ac);
+    hash->a_dc = dc;
+    hash->a_scale = scale;
   }
-  free(ctx.lpqa);
   return 0;
-DCT_err:
-  free(ctx.lpqa);
-  return TB_DCT_ERROR;
 }
 
-int thumbhash_decode(const struct thumbhash_t* restrict hash,
-                     uint32_t* restrict data) {
+int thumbhashp_decode(const struct thumbhashp_t* restrict hash,
+                      uint32_t* restrict data) {
   init_cos_table();
-  struct context_t ctx;
-  ctx.has_alpha = hash->has_alpha;
-  ctx.lpqa = calloc(4, sizeof(data_channel));
-  if (ctx.lpqa == NULL) {
+  struct context_t* ctx = calloc(1, sizeof(struct context_t));
+  if (ctx == NULL) {
     return -1;
   }
+  ctx->has_alpha = thumbhashp_has_alpha(hash);
 
   // Reconstruct the LPQA channels
-  float l_dc, p_dc, q_dc, a_dc;
-  float l_scale, p_scale, q_scale, a_scale;
-  thumbhash_bitfield_to_float(hash->l_dc, TB_DC_BITS, &l_dc, 0);
-  thumbhash_bitfield_to_float(hash->p_dc, TB_DC_BITS, &p_dc, 0);
-  thumbhash_bitfield_to_float(hash->q_dc, TB_DC_BITS, &q_dc, 0);
-  thumbhash_bitfield_to_float(hash->l_scale, TB_SCALE_BITS, &l_scale, 0);
-  thumbhash_bitfield_to_float(hash->p_scale, TB_SCALE_BITS, &p_scale, 0);
-  thumbhash_bitfield_to_float(hash->q_scale, TB_SCALE_BITS, &q_scale, 0);
 
-  // Decode luminance channel (6x6 DCT)
-  if (thumbhash_IDCT(ctx.lpqa[CH_L], hash->l_ac, TB_L_AC_DIM, l_dc, l_scale) !=
-      0) {
-    goto IDCT_err;
-  }
-
-  // Decode P channel (5x5 DCT)
-  if (thumbhash_IDCT(ctx.lpqa[CH_P], hash->p_ac, TB_P_AC_DIM, p_dc, p_scale) !=
-      0) {
-    goto IDCT_err;
-  }
-
-  // Decode Q channel (5x5 DCT)
-  if (thumbhash_IDCT(ctx.lpqa[CH_Q], hash->q_ac, TB_Q_AC_DIM, q_dc, q_scale) !=
-      0) {
-    goto IDCT_err;
-  }
-
-  // Decode alpha channel if present (6x6 DCT)
-  if (ctx.has_alpha) {
-    thumbhash_bitfield_to_float(hash->a_dc, TB_A_DC_BITS, &a_dc, 0);
-    thumbhash_bitfield_to_float(hash->a_scale, TB_A_SCALE_BITS, &a_scale, 0);
-
-    if (thumbhash_IDCT(ctx.lpqa[CH_A], hash->a_ac, TB_A_AC_DIM, a_dc,
-                       a_scale) != 0) {
-      goto IDCT_err;
-    }
-  } else {
-    // Fill with opaque alpha if no alpha channel
-    for (size_t i = 0; i < TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM; i++) {
-      ctx.lpqa[CH_A][i] = 1.0F;
-    }
+  channelIDCT(ctx->lpqa[CH_L], hash->l_ac, TB_L_AC_DIM, hash->l_dc,
+              hash->l_scale);
+  channelIDCT(ctx->lpqa[CH_P], hash->p_ac, TB_P_AC_DIM, hash->p_dc,
+              hash->p_scale);
+  channelIDCT(ctx->lpqa[CH_Q], hash->q_ac, TB_Q_AC_DIM, hash->q_dc,
+              hash->q_scale);
+  if (ctx->has_alpha) {
+    channelIDCT(ctx->lpqa[CH_A], hash->a_ac, TB_A_AC_DIM, hash->a_dc,
+                hash->a_scale);
   }
 
   // Convert LPQA back to RGBA
-  for (size_t i = 0; i < TB_SIZE_DATA_DIM * TB_SIZE_DATA_DIM; i++) {
-    float l = ctx.lpqa[CH_L][i];
-    float p = ctx.lpqa[CH_P][i] * 2.0F - 1.0F;
-    float q = ctx.lpqa[CH_Q][i] * 2.0F - 1.0F;
-    float a = ctx.lpqa[CH_A][i];
+  for (size_t i = 0; i < TB_DATA_DIM * TB_DATA_DIM; i++) {
+    float l = ctx->lpqa[CH_L][i];
+    float p = from_unit(ctx->lpqa[CH_P][i]);
+    float q = from_unit(ctx->lpqa[CH_Q][i]);
+    float a = ctx->has_alpha ? ctx->lpqa[CH_A][i] : 1.0F;
 
     // Convert LPQ to RGB
     float b = l - 2.0F / 3.0F * p;
@@ -405,34 +332,34 @@ int thumbhash_decode(const struct thumbhash_t* restrict hash,
     setChannel(a, &data[i], CH_A);
   }
 
-  free(ctx.lpqa);
+  free(ctx);
   return 0;
-IDCT_err:
-  free(ctx.lpqa);
-  return TB_IDCT_ERROR;
 }
 
-void* thumbhash_bytes(const struct thumbhash_t* restrict hash) {
-  size_t len = thumbhash_bytes_len(hash);
+bool thumbhashp_has_alpha(const struct thumbhashp_t* RESTRICT hash) {
+  return hash->a_scale != 0 || hash->a_dc != 0;
+}
+
+void* thumbhashp_to_bytes(const struct thumbhashp_t* restrict hash) {
+  size_t len = thumbhashp_bytes_len(hash);
   void* bytes = malloc(len);
   memcpy(bytes, hash, len);
   return bytes;
 }
 
-size_t thumbhash_bytes_len(const struct thumbhash_t* hash) {
-  if (hash->has_alpha) {
-    return sizeof(struct thumbhash_t);
-  } else {
-    return sizeof(struct thumbhash_t) - 10;
+size_t thumbhashp_bytes_len(const struct thumbhashp_t* hash) {
+  if (thumbhashp_has_alpha(hash)) {
+    return sizeof(struct thumbhashp_t);
   }
+  return sizeof(struct thumbhashp_t) - 10;
 }
 
-void thumbhash_from_bytes(struct thumbhash_t* RESTRICT hash,
-                          const void* restrict bytes) {
-  const uint8_t* data = bytes;
-  if (data[5] & 0x80) {  // has_alpha
-    memcpy(hash, data, sizeof(struct thumbhash_t));
+void thumbhashp_from_bytes(struct thumbhashp_t* RESTRICT hash,
+                           const void* restrict bytes) {
+  const struct thumbhashp_t* data = bytes;
+  if (thumbhashp_has_alpha(data)) {  // has_alpha
+    memcpy(hash, data, sizeof(struct thumbhashp_t));
   } else {
-    memcpy(hash, data, sizeof(struct thumbhash_t) - 10);
+    memcpy(hash, data, sizeof(struct thumbhashp_t) - 10);
   }
 }

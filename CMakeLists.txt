@@ -5,6 +5,8 @@ project(libthumbhash
     DESCRIPTION "A C implementation of ThumbHash image placeholder generation"
 )
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 
 # Library sources and headers
 set(LIBTHUMBHASH_SOURCES
@@ -25,6 +27,7 @@ target_sources(thumbhash
 
 set_target_properties(thumbhash PROPERTIES
     C_STANDARD_REQUIRED ON
+    C_STANDARD 11
     C_EXTENSIONS OFF  # For strict C99 compliance
 )
 
@@ -36,7 +39,7 @@ target_include_directories(thumbhash
 
 target_compile_options(thumbhash PUBLIC
     $<$<CONFIG:Debug>:-Wall -O0 -g -DDEBUG>
-    $<$<CONFIG:Release>:-Wall -ffast-math -flto -O3 -DNDEBUG>
+    $<$<CONFIG:Release>:-Wall -ffast-math -O3 -DNDEBUG>
 )
 
 target_link_options(thumbhash PUBLIC "-lm")
