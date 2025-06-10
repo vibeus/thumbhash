@@ -17,6 +17,12 @@
 #define CH_P 1
 #define CH_Q 2
 #define TB_MAX_AC_DIM 6
+#ifndef M_PI
+#define M_PI 3.14159265358979323846264338327950288
+#endif
+#ifndef M_SQRT2
+#define M_SQRT2 1.41421356237309504880168872420969808
+#endif
 
 typedef float data_channel[TB_DATA_DIM * TB_DATA_DIM];
 
@@ -43,7 +49,7 @@ static inline float C(int k) {
   if (k == 0) {
     return 1;
   }
-  return sqrt(2.0F);
+  return M_SQRT2;
 }
 
 // Convert value from [-1,1] range to [0,1] range
