@@ -35,6 +35,7 @@ extern "C" {
 // luminance and alpha channel are encoded with fixed terms
 // this will generate a fixed sized hash will a small extra space
 // total size of thumbhash_t struct is 40 bytes
+// when alpha channel is not present, last 10 bytes can be omitted
 #pragma pack(push, 1)
 struct thumbhash_t {
   // dc part and flag 6 bytes
@@ -68,11 +69,13 @@ int thumbhash_encode(struct thumbhash_t* RESTRICT hash,
 int thumbhash_decode(const struct thumbhash_t* RESTRICT hash,
                      uint32_t* RESTRICT data);
 
-// convert a thumbhash_t structure to a byte array. The function takes a pointer
-// to the output byte
-// the bytes should be of size sizeof(thumbhash_t)
-void thumbhash_bytes(uint8_t* RESTRICT bytes,
-                     const struct thumbhash_t* RESTRICT hash);
+// convert a thumbhash_t structure to a byte array. returned bytes are allocated
+// by the function and should be freed by the caller.
+void* thumbhash_bytes(const struct thumbhash_t* RESTRICT hash);
+size_t thumbhash_bytes_len(const struct thumbhash_t* hash);
+// convert a byte array to thumbhash_t struct.
+void thumbhash_from_bytes(struct thumbhash_t* RESTRICT hash,
+                          const void* RESTRICT bytes);
 #ifdef __cplusplus
 }
 #endif

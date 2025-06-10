@@ -412,7 +412,27 @@ IDCT_err:
   return TB_IDCT_ERROR;
 }
 
-void thumbhash_bytes(uint8_t* restrict bytes,
-                     const struct thumbhash_t* restrict hash) {
-  memcpy(bytes, hash, sizeof(struct thumbhash_t));
+void* thumbhash_bytes(const struct thumbhash_t* restrict hash) {
+  size_t len = thumbhash_bytes_len(hash);
+  void* bytes = malloc(len);
+  memcpy(bytes, hash, len);
+  return bytes;
+}
+
+size_t thumbhash_bytes_len(const struct thumbhash_t* hash) {
+  if (hash->has_alpha) {
+    return sizeof(struct thumbhash_t);
+  } else {
+    return sizeof(struct thumbhash_t) - 10;
+  }
+}
+
+void thumbhash_from_bytes(struct thumbhash_t* RESTRICT hash,
+                          const void* restrict bytes) {
+  const uint8_t* data = bytes;
+  if (data[5] & 0x80) {  // has_alpha
+    memcpy(hash, data, sizeof(struct thumbhash_t));
+  } else {
+    memcpy(hash, data, sizeof(struct thumbhash_t) - 10);
+  }
 }
